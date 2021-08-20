@@ -6,23 +6,61 @@ import path from 'path';
 import fs from 'fs';
 import * as https from 'https';
 import * as http from 'http';
+import prompts from 'prompts';
+import * as clipboardy from 'clipboardy';
+import { DateTime } from 'luxon';
 
 interface Offer {
-  sdp: RTCSessionDescription,
+  sdp: string,
   senderId: string,
   receiverId: string,
 }
 
 interface Answer {
-  sdp: RTCSessionDescription,
+  sdp: string,
   senderId: string,
   receiverId: string,
 }
 
+interface RTCIceAndroidCandidate {
+  sdp?: string;
+  sdpMLineIndex?: number | null;
+  sdpMid?: string | null;
+}
+
 interface Candidate {
-  candidate: RTCIceCandidateInit,
+  candidate: RTCIceAndroidCandidate | RTCIceCandidateInit,
   senderId: string,
   receiverId: string,
+}
+
+interface ThermalZone {
+  name: string,
+  value: number,
+}
+
+interface DeviceStatistic {
+  timestamp: number,
+  currentBatteryStatus: number,
+  currentDeviceTemperature?: ThermalZone[] | string,
+}
+
+class DeviceStatisticImpl {
+  constructor(
+    public timestamp: number,
+    public currentBatteryStatus: number,
+    public currentDeviceTemperature?: ThermalZone[],
+  ) {
+  }
+
+  // noinspection JSUnusedGlobalSymbols
+  toJSON(): DeviceStatistic {
+    return {
+      timestamp: this.timestamp,
+      currentBatteryStatus: this.currentBatteryStatus,
+      currentDeviceTemperature: this.currentDeviceTemperature ?? 'N/A',
+    }
+  }
 }
 
 const express = Express();
@@ -57,6 +95,7 @@ const io = new Server(httpServer, {
 
 let incrementValue = 0;
 const roomMap = new Map<number, string[]>();
+const deviceStatisticObject: { [key: string]: DeviceStatisticImpl[] } = {};
 
 io.on('connection', socket => {
   socket.on('create-room', async () => {
@@ -107,10 +146,114 @@ io.on('connection', socket => {
     console.log('RTC connection removed! socket id was ' + socket.id);
   });
 
+  socket.on('report-statistics', (deviceStatistic: DeviceStatisticImpl) => {
+    const array = deviceStatisticObject[socket.id] ?? Array.of();
+    array.push(deviceStatistic);
+    deviceStatisticObject[socket.id] = array;
+
+    const dateString = DateTime.fromMillis(deviceStatistic.timestamp).toLocaleString({
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      hour12: false,
+      minute: 'numeric',
+      second: 'numeric',
+    });
+
+    console.log(`(${dateString}) ${socket.id} > currentBatteryStatus: ${deviceStatistic.currentBatteryStatus}%`);
+    if (deviceStatistic.currentDeviceTemperature == null) {
+      console.log(`(${dateString}) ${socket.id} > currentDeviceTemperature: N/A`);
+    } else {
+      deviceStatistic.currentDeviceTemperature.forEach(value => {
+        console.log(`(${dateString}) ${socket.id} > currentDeviceTemperature: ${value.value}'C for ${value.name}`);
+      });
+    }
+
+    console.log('report collected! socket id was ' + socket.id);
+  });
+
   console.log('connection established!');
 });
 
 httpServer.listen(3000);
+
+listenPrompts();
+
+function listenPrompts() {
+  prompts({
+    type: 'select',
+    name: 'command',
+    message: '',
+    choices: [
+      { title: 'Show reports', value: 'showReport' },
+      { title: 'Export reports as json', value: 'exportReport' },
+      { title: 'Help', value: 'help' },
+    ],
+  }).then(value => {
+    console.log(value);
+
+    if (value.command === 'showReport') {
+      showReports();
+    } else if (value.command === 'exportReport') {
+      exportReports();
+    } else if (value.command === 'help') {
+      showHelpDescription();
+    }
+
+    listenPrompts();
+  })
+}
+
+function checkReportVisibility() {
+  return (Object.keys(deviceStatisticObject).length ?? 0) === 0;
+}
+
+function showReports() {
+  if (checkReportVisibility()) {
+    console.log('No report data is collected!');
+    return;
+  }
+
+  console.log('------------------------------ Reports start here -----------------------------');
+  Object.entries(deviceStatisticObject).forEach(value => {
+    value[1].forEach(value1 => {
+      const dateString = DateTime.fromMillis(value1.timestamp).toLocaleString({
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+        hour: 'numeric',
+        hour12: false,
+        minute: 'numeric',
+        second: 'numeric',
+      });
+      console.log(`(${dateString}) ${value[0]} > currentBatteryStatus: ${value1.currentBatteryStatus}%`);
+      if (value1.currentDeviceTemperature == null) {
+        console.log(`(${dateString}) ${value[0]} > currentDeviceTemperature: N/A`);
+      } else {
+        value1.currentDeviceTemperature.forEach(value2 => {
+          console.log(`(${dateString}) ${value[0]} > currentDeviceTemperature: ${value2.value}'C for ${value2.name}`);
+        });
+      }
+    });
+  });
+  console.log('------------------------------ Reports end here -----------------------------');
+}
+
+function exportReports() {
+  if (checkReportVisibility()) {
+    console.log('No report data is collected!');
+    return;
+  }
+
+  clipboardy.writeSync(JSON.stringify(deviceStatisticObject));
+  console.log('Finished! Just spam Ctrl + V!');
+}
+
+function showHelpDescription() {
+  console.log('\x1b[36m', 'Show reports:', '\x1b[32m', 'Show device reports');
+  console.log('\x1b[36m', 'Export reports as json:', '\x1b[32m', 'Export device report data as json into your clipboard. Just spam Ctrl + V!');
+}
 
 async function createRoom(socket: Socket) {
   const roomId = incrementValue++;
